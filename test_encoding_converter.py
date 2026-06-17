@@ -11,7 +11,9 @@ from encoding_converter import (
     detect_encoding,
     convert_file,
     find_files,
-    batch_convert
+    batch_convert,
+    _try_decode,
+    _resolve_encoding
 )
 
 CHINESE_LONG_TEXT = """
@@ -26,6 +28,42 @@ GBK、GB2312、GB18030都是中文编码，其中GB18030是最新的标准，
 这个工具的目的就是帮助用户批量完成这样的转换工作，
 自动检测文件编码并将其转换为目标编码格式。
 """
+
+
+class TestTryDecode(unittest.TestCase):
+
+    def test_valid_utf8(self):
+        self.assertTrue(_try_decode('你好'.encode('utf-8'), 'utf-8'))
+
+    def test_invalid_decode(self):
+        gbk_bytes = '你好'.encode('gbk')
+        self.assertFalse(_try_decode(gbk_bytes, 'utf-8'))
+
+    def test_unknown_encoding(self):
+        self.assertFalse(_try_decode(b'test', 'nonexistent_encoding_xyz'))
+
+
+class TestResolveEncoding(unittest.TestCase):
+
+    def test_high_confidence_passthrough(self):
+        result_enc, result_conf = _resolve_encoding(
+            '/dummy/path', b'dummy', 'utf-8', 0.9, 0.5
+        )
+        self.assertEqual(result_enc, 'utf-8')
+        self.assertEqual(result_conf, 0.9)
+
+    def test_low_confidence_gbk_family_fallback(self):
+        gbk_content = CHINESE_LONG_TEXT.encode('gbk')
+        result_enc, result_conf = _resolve_encoding(
+            '/dummy/path', gbk_content, 'GB18030', 0.3, 0.5
+        )
+        self.assertIn(result_enc.lower(), ['gbk', 'gb18030', 'gb2312'])
+
+    def test_low_confidence_no_family_match(self):
+        result_enc, result_conf = _resolve_encoding(
+            '/dummy/path', b'\xff\xfe\x00\x00', 'utf-8', 0.2, 0.5
+        )
+        self.assertEqual(result_enc, 'utf-8')
 
 
 class TestEncodingConverter(unittest.TestCase):
@@ -96,6 +134,59 @@ class TestEncodingConverter(unittest.TestCase):
         self.assertTrue(success)
         self.assertFalse(os.path.exists(file_path + '.bak'))
 
+    def test_convert_file_manual_source_encoding(self):
+        file_path = os.path.join(self.test_dir, 'manual_gbk.txt')
+        original_content = CHINESE_LONG_TEXT
+        self._create_file(file_path, original_content, 'gbk')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'utf-8', backup=False, source_encoding='gbk'
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(source_encoding, 'gbk')
+        self.assertEqual(confidence, 1.0)
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            self.assertEqual(f.read(), original_content)
+
+    def test_convert_file_manual_encoding_overrides_detection(self):
+        file_path = os.path.join(self.test_dir, 'override.txt')
+        original_content = '手动指定编码测试'
+        self._create_file(file_path, original_content, 'gbk')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'utf-8', backup=False, source_encoding='gbk'
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(source_encoding, 'gbk')
+        self.assertEqual(confidence, 1.0)
+
+    def test_convert_file_manual_encoding_invalid(self):
+        file_path = os.path.join(self.test_dir, 'invalid.txt')
+        self._create_file(file_path, 'test', 'utf-8')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'utf-8', backup=False, source_encoding='nonexistent_enc'
+        )
+
+        self.assertFalse(success)
+
+    def test_convert_file_low_confidence_short_gbk(self):
+        file_path = os.path.join(self.test_dir, 'short_gbk.txt')
+        original_content = '简短中文'
+        self._create_file(file_path, original_content, 'gbk')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'utf-8', backup=False, min_confidence=0.5
+        )
+
+        self.assertTrue(success)
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            self.assertEqual(f.read(), original_content)
+
     def test_find_files_recursive(self):
         self._create_file(os.path.join(self.test_dir, 'a.txt'), 'a', 'utf-8')
         self._create_file(os.path.join(self.test_dir, 'b.csv'), 'b', 'utf-8')
@@ -149,6 +240,22 @@ class TestEncodingConverter(unittest.TestCase):
 
         self.assertEqual(results['success'], 1)
         self.assertFalse(os.path.exists(os.path.join(self.test_dir, 'test.txt.bak')))
+
+    def test_batch_convert_with_manual_source_encoding(self):
+        self._create_file(os.path.join(self.test_dir, 'a.txt'), CHINESE_LONG_TEXT, 'gbk')
+        self._create_file(os.path.join(self.test_dir, 'b.txt'), '测试', 'gbk')
+
+        results = batch_convert(
+            self.test_dir,
+            target_encoding='utf-8',
+            extensions=['.txt'],
+            backup=False,
+            source_encoding='gbk'
+        )
+
+        self.assertEqual(results['total'], 2)
+        self.assertEqual(results['success'], 2)
+        self.assertEqual(results['failed'], 0)
 
     def test_already_utf8_skipped(self):
         file_path = os.path.join(self.test_dir, 'utf8_file.txt')
