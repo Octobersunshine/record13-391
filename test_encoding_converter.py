@@ -13,7 +13,12 @@ from encoding_converter import (
     find_files,
     batch_convert,
     _try_decode,
-    _resolve_encoding
+    _resolve_encoding,
+    normalize_encoding,
+    validate_encoding,
+    list_encodings,
+    is_encoding_compatible,
+    COMMON_ENCODINGS
 )
 
 CHINESE_LONG_TEXT = """
@@ -28,6 +33,48 @@ GBK、GB2312、GB18030都是中文编码，其中GB18030是最新的标准，
 这个工具的目的就是帮助用户批量完成这样的转换工作，
 自动检测文件编码并将其转换为目标编码格式。
 """
+
+
+class TestEncodingUtils(unittest.TestCase):
+
+    def test_normalize_encoding(self):
+        self.assertEqual(normalize_encoding('UTF-8'), 'utf_8')
+        self.assertEqual(normalize_encoding('gbk'), 'gbk')
+        self.assertEqual(normalize_encoding('GB 2312'), 'gb2312')
+        self.assertEqual(normalize_encoding('UTF_8'), 'utf_8')
+
+    def test_validate_encoding_valid(self):
+        for enc in ['utf-8', 'gbk', 'gb2312', 'gb18030', 'big5', 'ascii']:
+            self.assertTrue(validate_encoding(enc), f'{enc} should be valid')
+
+    def test_validate_encoding_invalid(self):
+        self.assertFalse(validate_encoding('nonexistent_encoding_xyz'))
+        self.assertFalse(validate_encoding(''))
+
+    def test_list_encodings_contains_utf8(self):
+        output = list_encodings()
+        self.assertIn('utf-8', output)
+        self.assertIn('gbk', output)
+        self.assertIn('gb2312', output)
+
+    def test_common_encodings_contains_targets(self):
+        self.assertIn('utf-8', COMMON_ENCODINGS)
+        self.assertIn('gbk', COMMON_ENCODINGS)
+        self.assertIn('gb2312', COMMON_ENCODINGS)
+        self.assertIn('gb18030', COMMON_ENCODINGS)
+
+    def test_is_encoding_compatible_same(self):
+        self.assertTrue(is_encoding_compatible('utf-8', 'UTF-8'))
+        self.assertTrue(is_encoding_compatible('gbk', 'GBK'))
+
+    def test_is_encoding_compatible_family(self):
+        self.assertTrue(is_encoding_compatible('GB18030', 'gbk'))
+        self.assertTrue(is_encoding_compatible('gbk', 'gb2312'))
+        self.assertTrue(is_encoding_compatible('gb2312', 'GB18030'))
+
+    def test_is_encoding_compatible_different(self):
+        self.assertFalse(is_encoding_compatible('utf-8', 'gbk'))
+        self.assertFalse(is_encoding_compatible('gbk', 'big5'))
 
 
 class TestTryDecode(unittest.TestCase):
@@ -112,6 +159,79 @@ class TestEncodingConverter(unittest.TestCase):
         backup_path = file_path + '.bak'
         self.assertTrue(os.path.exists(backup_path))
 
+    def test_convert_file_utf8_to_gbk(self):
+        file_path = os.path.join(self.test_dir, 'utf8_to_gbk.txt')
+        original_content = CHINESE_LONG_TEXT
+        self._create_file(file_path, original_content, 'utf-8')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'gbk', backup=True
+        )
+
+        self.assertTrue(success)
+
+        with open(file_path, 'r', encoding='gbk') as f:
+            converted_content = f.read()
+        self.assertEqual(converted_content, original_content)
+
+    def test_convert_file_utf8_to_gb2312(self):
+        file_path = os.path.join(self.test_dir, 'utf8_to_gb2312.txt')
+        original_content = CHINESE_LONG_TEXT
+        self._create_file(file_path, original_content, 'utf-8')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'gb2312', backup=True
+        )
+
+        self.assertTrue(success)
+
+        with open(file_path, 'r', encoding='gb2312') as f:
+            converted_content = f.read()
+        self.assertEqual(converted_content, original_content)
+
+    def test_convert_file_gbk_to_gb2312(self):
+        file_path = os.path.join(self.test_dir, 'gbk_to_gb2312.txt')
+        original_content = CHINESE_LONG_TEXT
+        self._create_file(file_path, original_content, 'gbk')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'gb2312', backup=True
+        )
+
+        self.assertTrue(success)
+
+        with open(file_path, 'r', encoding='gb2312') as f:
+            converted_content = f.read()
+        self.assertEqual(converted_content, original_content)
+
+    def test_convert_file_already_target_gbk(self):
+        file_path = os.path.join(self.test_dir, 'already_gbk.txt')
+        content = '已经是GBK编码'
+        self._create_file(file_path, content, 'gbk')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'gbk', backup=False
+        )
+
+        self.assertTrue(success)
+
+        with open(file_path, 'r', encoding='gbk') as f:
+            self.assertEqual(f.read(), content)
+
+    def test_convert_file_already_target_gb2312(self):
+        file_path = os.path.join(self.test_dir, 'already_gb2312.txt')
+        content = '已经是GB2312编码'
+        self._create_file(file_path, content, 'gb2312')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'gb2312', backup=False
+        )
+
+        self.assertTrue(success)
+
+        with open(file_path, 'r', encoding='gb2312') as f:
+            self.assertEqual(f.read(), content)
+
     def test_convert_file_already_utf8(self):
         file_path = os.path.join(self.test_dir, 'already_utf8.txt')
         content = 'UTF-8 content 中文'
@@ -150,6 +270,21 @@ class TestEncodingConverter(unittest.TestCase):
         with open(file_path, 'r', encoding='utf-8') as f:
             self.assertEqual(f.read(), original_content)
 
+    def test_convert_file_manual_source_to_gbk(self):
+        file_path = os.path.join(self.test_dir, 'manual_utf8_to_gbk.txt')
+        original_content = CHINESE_LONG_TEXT
+        self._create_file(file_path, original_content, 'utf-8')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'gbk', backup=False, source_encoding='utf-8'
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(source_encoding, 'utf-8')
+
+        with open(file_path, 'r', encoding='gbk') as f:
+            self.assertEqual(f.read(), original_content)
+
     def test_convert_file_manual_encoding_overrides_detection(self):
         file_path = os.path.join(self.test_dir, 'override.txt')
         original_content = '手动指定编码测试'
@@ -186,6 +321,16 @@ class TestEncodingConverter(unittest.TestCase):
 
         with open(file_path, 'r', encoding='utf-8') as f:
             self.assertEqual(f.read(), original_content)
+
+    def test_convert_file_invalid_target_encoding(self):
+        file_path = os.path.join(self.test_dir, 'invalid_target.txt')
+        self._create_file(file_path, 'test', 'utf-8')
+
+        success, _, _ = convert_file(
+            file_path, 'nonexistent_enc', backup=False
+        )
+
+        self.assertFalse(success)
 
     def test_find_files_recursive(self):
         self._create_file(os.path.join(self.test_dir, 'a.txt'), 'a', 'utf-8')
@@ -229,6 +374,47 @@ class TestEncodingConverter(unittest.TestCase):
             if detail['status'] == 'converted':
                 self.assertTrue(os.path.exists(detail['file'] + '.bak'))
 
+    def test_batch_convert_to_gbk(self):
+        self._create_file(os.path.join(self.test_dir, 'utf8_1.txt'), CHINESE_LONG_TEXT, 'utf-8')
+        self._create_file(os.path.join(self.test_dir, 'utf8_2.txt'), CHINESE_LONG_TEXT, 'utf-8')
+        self._create_file(os.path.join(self.test_dir, 'gbk.txt'), '中文内容测试', 'gbk')
+
+        results = batch_convert(
+            self.test_dir,
+            target_encoding='gbk',
+            extensions=['.txt'],
+            backup=False
+        )
+
+        self.assertEqual(results['total'], 3)
+        self.assertGreaterEqual(results['success'], 2)
+        self.assertEqual(results['failed'], 0)
+
+        for detail in results['details']:
+            with open(detail['file'], 'r', encoding='gbk') as f:
+                content = f.read()
+                self.assertIn('中', content)
+
+    def test_batch_convert_to_gb2312(self):
+        self._create_file(os.path.join(self.test_dir, 'to_gb2312_1.txt'), CHINESE_LONG_TEXT, 'utf-8')
+        self._create_file(os.path.join(self.test_dir, 'to_gb2312_2.txt'), CHINESE_LONG_TEXT, 'gbk')
+
+        results = batch_convert(
+            self.test_dir,
+            target_encoding='gb2312',
+            extensions=['.txt'],
+            backup=False
+        )
+
+        self.assertEqual(results['total'], 2)
+        self.assertGreaterEqual(results['success'], 1)
+        self.assertEqual(results['failed'], 0)
+
+        for detail in results['details']:
+            with open(detail['file'], 'r', encoding='gb2312') as f:
+                content = f.read()
+                self.assertIn('中', content)
+
     def test_batch_convert_no_backup(self):
         self._create_file(os.path.join(self.test_dir, 'test.txt'), CHINESE_LONG_TEXT, 'gbk')
 
@@ -256,6 +442,17 @@ class TestEncodingConverter(unittest.TestCase):
         self.assertEqual(results['total'], 2)
         self.assertEqual(results['success'], 2)
         self.assertEqual(results['failed'], 0)
+
+    def test_already_target_encoding_skipped(self):
+        file_path = os.path.join(self.test_dir, 'target_file.txt')
+        content = '这是目标编码的文件内容'
+        self._create_file(file_path, content, 'gbk')
+
+        success, source_encoding, confidence = convert_file(
+            file_path, 'gbk', backup=False
+        )
+
+        self.assertTrue(success)
 
     def test_already_utf8_skipped(self):
         file_path = os.path.join(self.test_dir, 'utf8_file.txt')

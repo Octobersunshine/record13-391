@@ -3,9 +3,24 @@ import sys
 import shutil
 import argparse
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import chardet
+
+COMMON_ENCODINGS: Dict[str, str] = {
+    'utf-8': 'UTF-8 (通用 Unicode 编码)',
+    'utf-8-sig': 'UTF-8 with BOM',
+    'gbk': 'GBK (简体中文，兼容 GB2312)',
+    'gb2312': 'GB2312 (简体中文)',
+    'gb18030': 'GB18030 (最新国家标准，向下兼容 GBK/GB2312)',
+    'big5': 'Big5 (繁体中文)',
+    'big5hkscs': 'Big5-HKSCS (香港繁体)',
+    'euc-jp': 'EUC-JP (日文)',
+    'shift_jis': 'Shift_JIS (日文)',
+    'euc-kr': 'EUC-KR (韩文)',
+    'latin-1': 'Latin-1 (西欧语言)',
+    'ascii': 'ASCII (纯英文)',
+}
 
 ENCODING_FAMILY = {
     'gb18030': ['gb18030', 'gbk', 'gb2312'],
@@ -16,6 +31,43 @@ ENCODING_FAMILY = {
     'euc_jp': ['euc_jp', 'shift_jis', 'cp932'],
     'shift_jis': ['shift_jis', 'cp932', 'euc_jp'],
 }
+
+
+def normalize_encoding(encoding: str) -> str:
+    return encoding.lower().replace('-', '_').replace(' ', '')
+
+
+def validate_encoding(encoding: str) -> bool:
+    try:
+        'test'.encode(encoding)
+        return True
+    except (LookupError, ValueError):
+        return False
+
+
+def is_encoding_compatible(enc1: str, enc2: str) -> bool:
+    if normalize_encoding(enc1) == normalize_encoding(enc2):
+        return True
+
+    key1 = normalize_encoding(enc1)
+    key2 = normalize_encoding(enc2)
+
+    for family in ENCODING_FAMILY.values():
+        if key1 in family and key2 in family:
+            return True
+
+    return False
+
+
+def list_encodings() -> str:
+    lines = []
+    lines.append('支持的常用编码：')
+    lines.append('-' * 60)
+    for code, desc in COMMON_ENCODINGS.items():
+        lines.append(f'  {code:<15} {desc}')
+    lines.append('-' * 60)
+    lines.append('也支持 Python 标准库中的其他编码名称。')
+    return '\n'.join(lines)
 
 
 def detect_encoding(file_path: str, sample_size: int = 100000) -> Tuple[str, float]:
@@ -37,7 +89,7 @@ def _resolve_encoding(file_path: str, content: bytes, detected_encoding: str, co
     if confidence >= min_confidence:
         return detected_encoding, confidence
 
-    key = detected_encoding.lower().replace('-', '_') if detected_encoding else ''
+    key = normalize_encoding(detected_encoding) if detected_encoding else ''
     family = ENCODING_FAMILY.get(key, [])
 
     for candidate in family:
@@ -69,7 +121,7 @@ def convert_file(
             file_path, content, detected_encoding, detected_confidence, min_confidence
         )
 
-    if resolved_encoding.lower().replace('-', '_') == target_encoding.lower().replace('-', '_'):
+    if normalize_encoding(resolved_encoding) == normalize_encoding(target_encoding):
         return True, resolved_encoding, detected_confidence
 
     if backup:
@@ -135,17 +187,19 @@ def batch_convert(
         'details': []
     }
 
+    target_norm = normalize_encoding(target_encoding)
+
     for file_path in files:
         success, src_enc, confidence = convert_file(
             file_path, target_encoding, backup, min_confidence, source_encoding
         )
 
-        if success and src_enc.lower().replace('-', '_') != target_encoding.lower().replace('-', '_'):
+        if success and normalize_encoding(src_enc) != target_norm:
             results['success'] += 1
             status = 'converted'
-        elif success and src_enc.lower().replace('-', '_') == target_encoding.lower().replace('-', '_'):
+        elif success and normalize_encoding(src_enc) == target_norm:
             results['skipped'] += 1
-            status = 'already_utf8'
+            status = 'already_target'
         else:
             results['failed'] += 1
             status = 'failed'
@@ -162,16 +216,17 @@ def batch_convert(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='文件编码批量转换工具 - 自动检测并转换为 UTF-8'
+        description='文件编码批量转换工具 - 自动检测编码并批量转换'
     )
     parser.add_argument(
         'path',
+        nargs='?',
         help='文件或目录路径'
     )
     parser.add_argument(
         '-t', '--target',
         default='utf-8',
-        help='目标编码（默认：utf-8）'
+        help='目标编码（默认：utf-8，支持 gbk、gb2312、utf-8 等）'
     )
     parser.add_argument(
         '-s', '--source-encoding',
@@ -205,12 +260,26 @@ def main():
         help='仅检测编码，不进行转换'
     )
     parser.add_argument(
+        '--list-encodings',
+        action='store_true',
+        help='列出所有支持的常用编码'
+    )
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='显示详细输出'
     )
 
     args = parser.parse_args()
+
+    if args.list_encodings:
+        print(list_encodings())
+        sys.exit(0)
+
+    if not args.path:
+        parser.print_help()
+        print('\n错误: 必须指定文件或目录路径', file=sys.stderr)
+        sys.exit(1)
 
     path = args.path
     target_encoding = args.target
@@ -221,6 +290,18 @@ def main():
     min_confidence = args.min_confidence
     detect_only = args.detect_only
     verbose = args.verbose
+
+    if not validate_encoding(target_encoding):
+        print(f'错误: 目标编码 "{target_encoding}" 无效', file=sys.stderr)
+        print(list_encodings(), file=sys.stderr)
+        sys.exit(1)
+
+    if source_encoding and not validate_encoding(source_encoding):
+        print(f'错误: 源编码 "{source_encoding}" 无效', file=sys.stderr)
+        print(list_encodings(), file=sys.stderr)
+        sys.exit(1)
+
+    target_norm = normalize_encoding(target_encoding)
 
     if os.path.isfile(path):
         if detect_only:
@@ -239,7 +320,7 @@ def main():
             encoding_label = source_encoding if source_encoding else src_enc
             print(f'编码: {encoding_label} (置信度: {confidence:.2f})')
             if success:
-                if src_enc.lower().replace('-', '_') == target_encoding.lower().replace('-', '_'):
+                if normalize_encoding(src_enc) == target_norm:
                     print(f'状态: 已经是 {target_encoding} 编码')
                 else:
                     print(f'状态: 转换成功 {src_enc} → {target_encoding}')
@@ -261,6 +342,7 @@ def main():
                 path, target_encoding, extensions, recursive, backup,
                 min_confidence, source_encoding
             )
+            print(f'目标编码: {target_encoding}')
             print(f'总计: {results["total"]} 个文件')
             print(f'转换成功: {results["success"]} 个')
             print(f'已是 {target_encoding}: {results["skipped"]} 个')
@@ -271,7 +353,7 @@ def main():
                 for detail in results['details']:
                     status_map = {
                         'converted': '已转换',
-                        'already_utf8': '已为UTF-8',
+                        'already_target': f'已为{target_encoding}',
                         'failed': '失败'
                     }
                     print(
